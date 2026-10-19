@@ -17,32 +17,38 @@ from .data.distortion import precompute_distortions
 from .models.cait import CaiTModel
 from .models.gravilens import GraviLens
 from .models.lensformer import Lensformer
-from .models.lenspinn import LensPINN
 from .models.vit import ViTModel
 from .models.vitsd import ViTSDModel
 from .training.loops import train_benchmark_model, train_gravilens
 from .training.training_manager import SimpleTrialManager
 from .utils import count_parameters, seed_everything
 
-# name -> (class, config, model_type key used by train_benchmark_model)
+# name -> (class, config, model_type key used by the training/eval dispatch,
+# transformer+feedforward activation class or None).
+# Mirrors the six trials of the recorded v9 benchmark, including the accepted
+# checkpoints. Note: the "LensPINN-Small" ablation in the run was implemented
+# as a smaller Lensformer (LENSPINN_SMALL_CONFIG, patch=16, embed=384, 2
+# blocks) — not the LensPINN class, which the run did not train.
 REGISTRY = {
-    'gravilens': (GraviLens, GRAVILENS_CONFIG, 'gravilens'),
-    'lensformer': (Lensformer, LENSFORMER_CONFIG, 'lensformer'),
-    'lenspinn-small': (LensPINN, LENSPINN_SMALL_CONFIG, 'lenspinn_small'),
-    'vit': (ViTModel, VIT_CONFIG, 'vit'),
-    'cait': (CaiTModel, CAIT_CONFIG, 'cait'),
-    'vitsd': (ViTSDModel, VITSD_CONFIG, 'vitsd'),
+    'gravilens': (GraviLens, GRAVILENS_CONFIG, 'gravilens', nn.GELU),
+    'lensformer': (Lensformer, LENSFORMER_CONFIG, 'lensformer', nn.ELU),
+    'lenspinn-small': (Lensformer, LENSPINN_SMALL_CONFIG, 'lensformer', nn.ELU),
+    'vit': (ViTModel, VIT_CONFIG, 'vit', None),
+    'cait': (CaiTModel, CAIT_CONFIG, 'cait', None),
+    'vitsd': (ViTSDModel, VITSD_CONFIG, 'vitsd', None),
 }
 
 
-def build_model(cls, cfg, n_classes, device):
+def build_model(cls, cfg, n_classes, device, activation):
     """Instantiate a model from a v9 config, passing only accepted arguments."""
     sig = inspect.signature(cls.__init__).parameters
     kw = {k: v for k, v in cfg.items() if k in sig}
     if 'dropout' in cfg and 'dropout_rate' in sig:
         kw['dropout_rate'] = cfg['dropout']
-    extra = dict(device=device, num_classes=n_classes,
-                 transformer_activation=nn.GELU, feedforward_activation=nn.GELU)
+    extra = dict(device=device, num_classes=n_classes)
+    if activation is not None:
+        extra['transformer_activation'] = activation
+        extra['feedforward_activation'] = activation
     kw.update({k: v for k, v in extra.items() if k in sig})
     return cls(**kw).to(device)
 
@@ -83,9 +89,9 @@ def main(argv=None):
 
     manager = SimpleTrialManager(args.checkpoint_dir)
     for name in args.models:
-        cls, cfg, model_type = REGISTRY[name]
+        cls, cfg, model_type, activation = REGISTRY[name]
         print(f'  Training {name} ...')
-        model = build_model(cls, cfg, n_classes, device)
+        model = build_model(cls, cfg, n_classes, device, activation)
         count_parameters(model)
         trial = manager.create_trial(f'{name}-v9-benchmark',
                                      config={**cfg, 'model': name,
