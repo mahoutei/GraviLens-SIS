@@ -1,5 +1,9 @@
+# Extracted verbatim from gravilens_finals_poster.py (final v9 Colab export).
+import torch
+import torch.nn as nn
+
 class LabelSmoothingCrossEntropy(nn.Module):
-    """Cross entropy with label smoothing"""
+    """Cross entropy with label smoothing (Szegedy et al., 2016)."""
     def __init__(self, smoothing=0.1):
         super().__init__()
         self.smoothing = smoothing

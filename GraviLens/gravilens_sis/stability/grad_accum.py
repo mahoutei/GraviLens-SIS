@@ -1,5 +1,6 @@
+# Extracted verbatim from gravilens_finals_poster.py (final v9 Colab export).
+
 class GradientAccumulator:
-    """Accumulates gradients over multiple batches"""
     def __init__(self, accumulation_steps=4):
         self.accumulation_steps = accumulation_steps
         self.current_step = 0

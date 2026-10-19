@@ -1,204 +1,100 @@
-class GraviLensSIS(nn.Module):
-    """
-    FIXED GraviLens model with complete interface
+# Extracted verbatim from gravilens_finals_poster.py (final v9 Colab export).
+import math
 
-    Now includes:
-    - forward() for classification
-    - invert_lens() for source reconstruction
-    - predict_lens_parameters() for κ-map prediction
+import torch
+import torch.nn as nn
+
+from ..components.feedforward import FeedForward
+from ..components.flatten import Flatten
+from ..components.htransformer import HierarchicalTransformerStage
+from ..components.spt import ShiftedPatchTokenization
+from ..physics.sis_encoder import SISPhysicsInformedEncoder
+
+class GraviLens(nn.Module):
     """
-    def __init__(self, image_size, patch_size, embed_dim, in_channels,
-                 num_classes, num_heads, num_hidden_neurons, num_hidden_layers,
+    GraviLens with SIS physics (formerly GraviLensSIS).
+
+    Pipeline:
+      1. ShiftedPatchTokenization (initial patches from lensed image)
+      2. SISPhysicsInformedEncoder -> source-plane reconstruction
+      3. ShiftedPatchTokenization (secondary patches from source image)
+      4. HierarchicalTransformerStage with cross-attention
+         (query=initial, key/value=source patches)
+      5. FeedForward classifier head
+    """
+    def __init__(self, image_size: int, patch_size: int, embed_dim: int,
+                 in_channels: int, num_classes: int, num_heads: int,
+                 num_hidden_neurons: int, num_hidden_layers: int,
                  transformer_activation, feedforward_activation,
-                 num_transformer_blocks, device, dropout_rate=0.1,
-                 window_size=4, use_physics_preprocessing=True):
+                 num_transformer_blocks: int, device: torch.device,
+                 dropout_rate: float = 0.1, window_size: int = 4):
         super().__init__()
-
         self.image_size = image_size
         self.patch_size = patch_size
-        self.embed_dim = embed_dim
-        self.device = device
-        self.use_physics_preprocessing = use_physics_preprocessing
+        self.embed_dim  = embed_dim
+        self.device     = device
 
-        # ========== Physics Preprocessing Pipeline ==========
-        # Stage 1: Physics preprocessing (Log → Hessian → 2 channels)
-        self.physics_preprocessing = PhysicsPreprocessing(eps=1e-8)
-
-        # Stage 2: Tokenize physics features (2-channel input)
-        self.physics_tokenizer = ShiftedPatchTokenization(
-            image_size, patch_size, embed_dim, in_channels=2, device=device
-        )
-
-        # For secondary path (delensed image tokenization)
+        self.initial_tokenizer   = ShiftedPatchTokenization(
+            image_size, patch_size, embed_dim, in_channels, device)
         self.secondary_tokenizer = ShiftedPatchTokenization(
-            image_size, patch_size, embed_dim, in_channels=1, device=device
-        )
+            image_size, patch_size, embed_dim, in_channels, device)
 
-        # IMPORTANT: Store as initial_tokenizer for compatibility
-        self.initial_tokenizer = self.physics_tokenizer
-
-        num_patches = self.physics_tokenizer.get_num_patches()
+        num_patches = self.initial_tokenizer.get_num_patches()
         self.H = self.W = int(math.sqrt(num_patches))
 
-        # Encoder with physics pipeline
+        if self.H % window_size != 0:
+            orig_ws = window_size
+            for ws in [2, 4, 8]:
+                if self.H % ws == 0:
+                    window_size = ws
+                    break
+            print(f"  Adjusted window_size: {orig_ws} -> {window_size} "
+                  f"for H={self.H}")
+        self.window_size = window_size
+
+        print(f"  GraviLens config:")
+        print(f"    Image {image_size}x{image_size}, "
+              f"Patches {self.H}x{self.W} ({num_patches} total)")
+        print(f"    embed_dim={embed_dim}, heads={num_heads}, "
+              f"blocks={num_transformer_blocks}, window={window_size}")
+
         self.encoder = SISPhysicsInformedEncoder(
             image_size, patch_size, embed_dim, num_patches, num_heads,
-            num_hidden_neurons, transformer_activation, num_transformer_blocks,
-            device, window_size=window_size,
-            use_physics_preprocessing=use_physics_preprocessing
-        )
+            num_hidden_neurons, transformer_activation,
+            num_transformer_blocks, device, window_size=window_size)
 
         self.transformer_stage = HierarchicalTransformerStage(
-            dim=embed_dim, depth=num_transformer_blocks, num_heads=num_heads,
-            window_size=window_size, mlp_ratio=4., dropout=dropout_rate
-        )
+            dim=embed_dim, depth=num_transformer_blocks,
+            num_heads=num_heads, window_size=window_size,
+            mlp_ratio=4., dropout=dropout_rate)
 
         self.flatten_layer = Flatten((num_patches + 1) * embed_dim)
         self.feedforward_layer = FeedForward(
             self.flatten_layer.num_neurons_flatten, num_classes,
-            feedforward_activation, num_hidden_neurons, num_hidden_layers,
-            task_type='multi_classification', dropout=dropout_rate
-        )
+            feedforward_activation, num_hidden_neurons,
+            num_hidden_layers, dropout=dropout_rate)
 
-    def forward(self, images):
-        """
-        Main forward pass for classification
+    def invert_lens(self, images: torch.Tensor) -> torch.Tensor:
+        B = images.size(0)
+        patches = self.initial_tokenizer(
+            images.reshape(B, 1, self.image_size, self.image_size))
+        return self.encoder(images, patches)
 
-        Pipeline:
-        1. Preprocess image → Physics features (2 channels)
-        2. Tokenize physics features → Physics patches
-        3. Encoder processes physics patches → Delensed image
-        4. Tokenize delensed image → Secondary patches
-        5. Cross-attention (query=physics, key/value=delensed)
-        6. Classification
+    def predict_lens_parameters(self, images: torch.Tensor) -> torch.Tensor:
+        B = images.size(0)
+        patches = self.initial_tokenizer(
+            images.reshape(B, 1, self.image_size, self.image_size))
+        out = self.encoder.transformer(patches, self.H, self.W)
+        return self.encoder.sis_predictor(out)
 
-        Args:
-            images: (B, H, W) input galaxy images
-
-        Returns:
-            predictions: (B, num_classes) class logits
-        """
-        batch_size = images.size(0)
-
-        # Step 1: Physics preprocessing
-        physics_features = self.physics_preprocessing(
-            images.reshape(batch_size, 1, self.image_size, self.image_size)
-        )  # (B, 2, 64, 64)
-
-        # Step 2: Tokenize physics features
-        physics_patches = self.physics_tokenizer(physics_features)
-
-        # Step 3: Encoder uses physics patches to get delensed images
-        lens_corrected_images = self.encoder(images, physics_patches)
-
-        # Step 4: Tokenize delensed images
-        lens_corrected_patches = self.secondary_tokenizer(
-            lens_corrected_images.reshape(batch_size, 1, self.image_size, self.image_size)
-        )
-
-        # Step 5: Cross-attention
-        output_patches = self.transformer_stage(
-            x=physics_patches,  # Query: physics-informed features
-            H=self.H, W=self.W,
-            key=lens_corrected_patches,    # Key: delensed features
-            value=lens_corrected_patches   # Value: delensed features
-        )
-
-        # Step 6: Classification
-        flattened_patches = self.flatten_layer(output_patches)
-        final_predictions = self.feedforward_layer(flattened_patches)
-
-        return final_predictions
-
-    # ========================================================================
-    # NEW METHOD 1: GRAVITATIONAL LENS INVERSION
-    # ========================================================================
-    def invert_lens(self, images):
-        """
-        Reconstruct source galaxy from lensed observation
-
-        This applies the physics-based gravitational lens inversion to
-        reconstruct the unlensed source galaxy from the observed lensed image.
-
-        Physics: β = θ - α(θ)
-        Where:
-        - θ = image plane position (observed)
-        - α = deflection angle (from κ-map)
-        - β = source plane position (reconstructed)
-
-        Args:
-            images: (B, H, W) or (B, 1, H, W) lensed galaxy images
-
-        Returns:
-            delensed_images: (B, H, W) reconstructed source plane images
-
-        Example:
-            >>> lensed_galaxy = torch.randn(1, 64, 64).to(device)
-            >>> source = model.invert_lens(lensed_galaxy)
-            >>> print(source.shape)  # (1, 64, 64)
-        """
-        batch_size = images.size(0)
-
-        # Ensure correct input shape (B, 1, H, W)
-        if images.dim() == 3:
-            images = images.reshape(batch_size, 1, self.image_size, self.image_size)
-        elif images.dim() == 4 and images.size(1) != 1:
-            images = images.reshape(batch_size, 1, self.image_size, self.image_size)
-
-        # Step 1: Preprocess to get physics features
-        physics_features = self.physics_preprocessing(images)
-
-        # Step 2: Tokenize physics features
-        physics_patches = self.physics_tokenizer(physics_features)
-
-        # Step 3: Get delensed reconstruction from encoder
-        # The encoder applies: β = θ - α(θ) using SIS deflection
-        delensed_images = self.encoder(images.squeeze(1), physics_patches)
-
-        return delensed_images
-
-    # ========================================================================
-    # NEW METHOD 2: CONVERGENCE MAP PREDICTION
-    # ========================================================================
-    def predict_lens_parameters(self, images):
-        """
-        Predict convergence (κ) map from lensed images
-
-        The κ-map represents the projected mass distribution of the lens,
-        which determines the gravitational deflection strength.
-
-        For SIS (Singular Isothermal Sphere):
-        - κ(r) is approximately constant
-        - Deflection: α = κ · (θ/|θ|)
-        - Higher κ → stronger lensing → larger Einstein ring
-
-        Args:
-            images: (B, H, W) or (B, 1, H, W) lensed galaxy images
-
-        Returns:
-            kappa_map: (B, 1, H, W) predicted convergence map
-
-        Example:
-            >>> lensed_galaxy = torch.randn(1, 64, 64).to(device)
-            >>> kappa = model.predict_lens_parameters(lensed_galaxy)
-            >>> print(kappa.shape)  # (1, 1, 64, 64)
-            >>> print(kappa.mean())  # Should be around 0.8-1.2 for physical lenses
-        """
-        batch_size = images.size(0)
-
-        # Ensure correct input shape (B, 1, H, W)
-        if images.dim() == 3:
-            images = images.reshape(batch_size, 1, self.image_size, self.image_size)
-        elif images.dim() == 4 and images.size(1) != 1:
-            images = images.reshape(batch_size, 1, self.image_size, self.image_size)
-
-        # Step 1: Preprocess to get physics features
-        physics_features = self.physics_preprocessing(images)
-
-        # Step 2: Tokenize physics features
-        physics_patches = self.physics_tokenizer(physics_features)
-
-        # Step 3: Get κ-map from encoder
-        kappa_map = self.encoder.get_predicted_parameters(images.squeeze(1), physics_patches)
-
-        return kappa_map
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        B = images.size(0)
+        init_patches = self.initial_tokenizer(
+            images.reshape(B, 1, self.image_size, self.image_size))
+        source_img = self.encoder(images, init_patches)
+        src_patches = self.secondary_tokenizer(
+            source_img.reshape(B, 1, self.image_size, self.image_size))
+        out = self.transformer_stage(
+            x=init_patches, H=self.H, W=self.W,
+            key=src_patches, value=src_patches)
+        return self.feedforward_layer(self.flatten_layer(out))

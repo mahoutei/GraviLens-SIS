@@ -1,5 +1,8 @@
+# Extracted verbatim from gravilens_finals_poster.py (final v9 Colab export).
+import torch
+
 class Lookahead:
-    """Lookahead optimizer wrapper (Zhang et al., 2019)"""
+    """Lookahead optimizer wrapper (Zhang et al., 2019)."""
     def __init__(self, optimizer, k=5, alpha=0.5):
         self.optimizer = optimizer
         self.k = k
@@ -23,21 +26,18 @@ class Lookahead:
                 for p in group['params']:
                     if p.grad is None:
                         continue
-                    param_state = self.state[p]
-                    slow_param = param_state['slow_param']
-                    slow_param.add_(p.data - slow_param, alpha=self.alpha)
-                    p.data.copy_(slow_param)
+                    slow = self.state[p]['slow_param']
+                    slow.add_(p.data - slow, alpha=self.alpha)
+                    p.data.copy_(slow)
         return loss
 
     def zero_grad(self):
         self.optimizer.zero_grad()
 
     def state_dict(self):
-        return {
-            'optimizer': self.optimizer.state_dict(),
-            'state': self.state,
-            'step_counter': self.step_counter
-        }
+        return {'optimizer': self.optimizer.state_dict(),
+                'state': self.state,
+                'step_counter': self.step_counter}
 
     def load_state_dict(self, state_dict):
         self.optimizer.load_state_dict(state_dict['optimizer'])
