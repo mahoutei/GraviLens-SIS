@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "GraviLens: A Physics-Informed Vision Transformer for Dark Matter Classification via Strong Gravitational Lensing"
+version: 1.0.0
+date-released: 2026-10-19
+repository-code: "https://github.com/mahoutei/GraviLens-SIS"
+license: MIT
+abstract: >-
+  GraviLens is a physics-informed Swin-style vision transformer for
+  strong-gravitational-lensing image classification, trained and evaluated
+  against five baseline architectures (Lensformer, LensPINN-Small, ViT,
+  CaiT, ViTSD) in the v9 benchmark. This repository contains the final
+  training, evaluation, and visualization code.
+authors:
+  - family-names: Catiil
+    given-names: "Dean Mark H."
+keywords:
+  - strong gravitational lensing
+  - dark matter
+  - physics-informed neural network
+  - vision transformer
+  - image classification
+  - singular isothermal sphere

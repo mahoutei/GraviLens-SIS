@@ -1,2 +1,11 @@
 __pycache__/
-*.pyc
+*.py[cod]
+.ipynb_checkpoints/
+model_checkpoints/
+*.pth
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
